@@ -1,25 +1,18 @@
 import os
-import argparse
-import shutil
 import time
-import torch
 import torch.nn.functional as F
 import torch.nn.parallel
-import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
-import torchvision.transforms as transforms
+from skimage.io import imread
 
-import numpy as np
-import flow_transforms
 import models
 from loss_functions import *
 from tensorboardX import SummaryWriter
-import matplotlib.pyplot as plt
 from config import cfg, cfg_from_file, save_config_to_file
-from utils import frame_utils
 from utils.flow_viz import flow_to_image
 from utils.log import create_logger
+from user_input import user_input
 
 import datasets
 
@@ -30,70 +23,13 @@ import datasets
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__"))
 
-
-parser = argparse.ArgumentParser(description='Parser for training and testing',
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-
-parser.add_argument('--data',help='path to dataset')
-parser.add_argument('--data-kitti12',help='path to kitti2012, if necessary', default=None)
-parser.add_argument('--cfg', dest='cfg', default=None, type=str, help='path to config file')
-parser.add_argument('--dataset', metavar='DATASET', default='flying_chairs')
-
-group = parser.add_mutually_exclusive_group()
-group.add_argument('-s', '--split-file', default=None, type=str,help='test-val split file')
-parser.add_argument('--solver', default='adam',choices=['adam','sgd'],
-                    help='solver algorithms')
-parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
-                    help='number of data loading workers')
-parser.add_argument('--epochs', default=300, type=int, metavar='N',
-                    help='number of total epochs to run')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
-                    help='manual epoch number (useful on restarts)')
-parser.add_argument('--epoch-size', default=0, type=int, metavar='N',
-                    help='manual epoch size (will match dataset size if set to 0)')
-parser.add_argument('-b', '--batch-size', default=4, type=int,
-                    metavar='N', help='mini-batch size')
-parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
-                    metavar='LR', help='initial learning rate')
-parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                    help='evaluate model on validation set')
-
-parser.add_argument('--pretrained', dest='pretrained', default=None,
-                    help='path to pre-trained model')
-
-parser.add_argument('--milestones', default=[300,500,1000], metavar='N', nargs='*', help='epochs at which learning rate is divided by 2')
-parser.add_argument('--seed', type=int, default=1, metavar='S',
-                    help='random seed (default: 1)')
-
-parser.add_argument('--eval_freq', default=1, type=int,
-                    help='evaluation frequency')
-parser.add_argument('--no-eval', action='store_true',
-                    help='do not conduct validation ')
-parser.add_argument('--print_freq', '-p', default=100, type=int,
-                    metavar='N', help='print frequency')
-parser.add_argument('--reuse_optim', action='store_true',
-                    help='reuse optimizer ')
-parser.add_argument('--eval_sintel', action='store_true',
-                    help='eval on sintel ')
-parser.add_argument('--out_dir', default=None,
-                    help='path to save model')
-parser.add_argument('--exp_dir', default='default',
-                    help='path to save model')
-parser.add_argument('--visual_all', action='store_true',
-                    help='eval on sintel ')
-parser.add_argument('--clip', default=-1, type=float)
-
-
 best_EPE = -1
 n_iter = 0
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-
 def main():
     global args, best_EPE, save_path
-    args = parser.parse_args()
 
     # Load config file
     if args.cfg is not None:
@@ -132,8 +68,8 @@ def main():
     torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    train_writer = SummaryWriter(os.path.join(save_path,'train'))
-    eval_writer = SummaryWriter(os.path.join(save_path,'eval'))
+    train_writer = SummaryWriter(os.path.join(save_path,'train', args.pretrained.split("\\")[-1].split(".")[0].split("_")[-1]))
+    eval_writer = SummaryWriter(os.path.join(save_path,'eval', args.pretrained.split("\\")[-1].split(".")[0].split("_")[-1]))
 
 
     logger.info("=> fetching img pairs in '{}'".format(args.data))
@@ -152,9 +88,9 @@ def main():
         train_dataset= datasets.SceneFlow(args, image_size=cfg.CROP_SIZE,root=args.data, dstype='frames_cleanpass',mode='train')
         test_dataset = datasets.SceneFlow(args, image_size=cfg.CROP_SIZE,root=args.data, dstype='frames_cleanpass',mode='val',do_augument=False)
     elif args.dataset == 'mpi_sintel_clean' or args.dataset =='mpi_sintel_final':
-        clean_dataset = datasets.MpiSintel(args, image_size=cfg.CROP_SIZE,root=args.data, dstype='clean')
-        final_dataset = datasets.MpiSintel(args, image_size=cfg.CROP_SIZE,root=args.data, dstype='final')
-        train_dataset = torch.utils.data.ConcatDataset([clean_dataset]+ [final_dataset])
+        # clean_dataset = datasets.MpiSintel(args, image_size=cfg.CROP_SIZE, root=args.data, dstype='clean')
+        # final_dataset = datasets.MpiSintel(args, image_size=cfg.CROP_SIZE,root=args.data, dstype='final')
+        # train_dataset = torch.utils.data.ConcatDataset([clean_dataset] + [final_dataset])
         if args.dataset == 'mpi_sintel_final':
             test_dataset = datasets.MpiSintel(args, do_augument=False,image_size=None,root=args.data, dstype='final')
         else:
@@ -169,18 +105,18 @@ def main():
         raise NotImplementedError
 
 
-    logger.info('Training with %d image pairs' % len(train_dataset))
+    # logger.info('Training with %d image pairs' % len(train_dataset))
 
     logger.info('Testing with %d image pairs' % len(test_dataset))
 
-    gpuargs = {'num_workers': args.workers, 'drop_last' : cfg.DROP_LAST}
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, 
-        pin_memory=True, shuffle=True, **gpuargs)
+    # gpuargs = {'num_workers': args.workers, 'drop_last' : cfg.DROP_LAST}
+    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
+    #     pin_memory=True, shuffle=True, **gpuargs)
 
     if 'KITTI' in args.dataset:
         # We set batch size to 1 since KITTI images have different sizes
         val_loader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=1,num_workers=args.workers, pin_memory=True, shuffle=False)
+            test_dataset, batch_size=1, num_workers=args.workers, pin_memory=True, shuffle=False)
     else:
         val_loader = torch.utils.data.DataLoader(
             test_dataset, batch_size=args.batch_size,num_workers=args.workers, pin_memory=True, shuffle=False)
@@ -228,58 +164,58 @@ def main():
     # Evaluation
     if args.evaluate:
         with torch.no_grad():
-            best_EPE = validate(val_loader, model, 0, None, eval_writer,logger=logger)
+            best_EPE = validate(val_loader, model, 0, eval_writer, logger=logger)
         return
 
-    # Learning rate schedule
-    milestones =[]
-    for num in range(len(args.milestones)):
-        milestones.append(int(args.milestones[num]))
-
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
-    
-
-    ###################################### Training  ######################################
-    for epoch in range(args.start_epoch, args.epochs):
-
-        # train for one epoch
-        train_loss = train(train_loader, model, optimizer, epoch, train_writer,logger=logger)
-        scheduler.step()
-        
-        train_writer.add_scalar('lr',optimizer.param_groups[0]['lr'],epoch)
-        train_writer.add_scalar('avg_loss',train_loss,epoch)
-
-        if epoch%args.eval_freq==0 and not args.no_eval:
-            with torch.no_grad():
-                EPE = validate(val_loader, model, epoch, output_writers,eval_writer,logger=logger)
-            eval_writer.add_scalar('mean_EPE', EPE, epoch)
-
-            if best_EPE < 0:
-                best_EPE = EPE
-
-            if EPE<best_EPE:
-                best_EPE = EPE
-                ckpt_best_file = 'checkpoint_best.pth.tar'
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': 'dicl_wrapper',
-                    'state_dict': model.module.state_dict(),
-                    'optimizer_state':optimizer.state_dict(),
-                    'best_EPE': EPE
-                }, False, filename=ckpt_best_file) 
-            logger.info('Epoch: [{0}] Best EPE: {1}'.format(epoch, best_EPE))
-
-        # Skip at least 5 epochs to save memory
-        save_freq = max(args.eval_freq, 5)
-        if epoch%save_freq==0:
-            ckpt_file = 'checkpoint_'+str(epoch)+'.pth.tar'
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': 'dicl_wrapper',
-                'state_dict': model.module.state_dict(),
-                'optimizer_state':optimizer.state_dict(),
-                'best_EPE': best_EPE
-            }, False, filename=ckpt_file)
+    # # Learning rate schedule
+    # milestones =[]
+    # for num in range(len(args.milestones)):
+    #     milestones.append(int(args.milestones[num]))
+    #
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
+    #
+    #
+    # ###################################### Training  ######################################
+    # for epoch in range(args.start_epoch, args.epochs):
+    #
+    #     # train for one epoch
+    #     train_loss = train(train_loader, model, optimizer, epoch, train_writer,logger=logger)
+    #     scheduler.step()
+    #
+    #     train_writer.add_scalar('lr',optimizer.param_groups[0]['lr'],epoch)
+    #     train_writer.add_scalar('avg_loss',train_loss,epoch)
+    #
+    #     if epoch%args.eval_freq == 0 and not args.no_eval:
+    #         with torch.no_grad():
+    #             EPE = validate(val_loader, model, epoch, eval_writer, logger=logger)
+    #         eval_writer.add_scalar('mean_EPE', EPE, epoch)
+    #
+    #         if best_EPE < 0:
+    #             best_EPE = EPE
+    #
+    #         if EPE<best_EPE:
+    #             best_EPE = EPE
+    #             ckpt_best_file = 'checkpoint_best.pth.tar'
+    #             save_checkpoint({
+    #                 'epoch': epoch + 1,
+    #                 'arch': 'dicl_wrapper',
+    #                 'state_dict': model.module.state_dict(),
+    #                 'optimizer_state':optimizer.state_dict(),
+    #                 'best_EPE': EPE
+    #             }, False, filename=ckpt_best_file)
+    #         logger.info('Epoch: [{0}] Best EPE: {1}'.format(epoch, best_EPE))
+    #
+    #     # Skip at least 5 epochs to save memory
+    #     save_freq = max(args.eval_freq, 5)
+    #     if epoch%save_freq==0:
+    #         ckpt_file = 'checkpoint_'+str(epoch)+'.pth.tar'
+    #         save_checkpoint({
+    #             'epoch': epoch + 1,
+    #             'arch': 'dicl_wrapper',
+    #             'state_dict': model.module.state_dict(),
+    #             'optimizer_state':optimizer.state_dict(),
+    #             'best_EPE': best_EPE
+    #         }, False, filename=ckpt_file)
 
 
 
@@ -389,24 +325,24 @@ def train(train_loader, model, optimizer, epoch, train_writer,logger):
     return losses.avg
 
 
-def validate(val_loader, model, epoch, output_writers,test_writer,logger):
+def validate(val_loader, model, epoch, test_writer, logger):
     global args
 
-    batch_time = AverageMeter(); flow2_EPEs = AverageMeter()
+    # batch_time = AverageMeter(); flow2_EPEs = AverageMeter()
 
-    epe_records = [AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),
-                AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),
-                AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter()]
+    # epe_records = [AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),
+    #             AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),
+    #             AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter(),AverageMeter()]
 
     # switch to evaluate mode
     model.eval()
 
-    end = time.time()
-    out_list = []
+    # end = time.time()
+    # out_list = []
 
-    for i, (input1, target,valid) in enumerate(val_loader):
-        target = target.to(device)            
-        input1 = torch.cat(input1,1).to(device)
+    for i, (input1, target, valid) in enumerate(val_loader):
+        # target = target.to(device)
+        input1 = torch.cat(input1, 1).to(device)
         raw_shape = input1.shape
 
         # Pad the input images to N*128
@@ -420,15 +356,15 @@ def validate(val_loader, model, epoch, output_writers,test_writer,logger):
             input1 = torch.nn.functional.pad(input1, padding, "replicate", 0)
 
         # If there is no valid mask, compute all pixels
-        if valid is None:  valid = torch.ones(target.shape)[:,0,:,:].type_as(target)
-
-        target = torch.nn.functional.pad(target, padding, "constant", 0)
-        valid = torch.nn.functional.pad(valid, padding, "constant", 0)
-        target = target[:,0:2,:,:]
+        # if valid is None:  valid = torch.ones(target.shape)[:,0,:,:].type_as(target)
+        #
+        # target = torch.nn.functional.pad(target, padding, "constant", 0)
+        # valid = torch.nn.functional.pad(valid, padding, "constant", 0)
+        # target = target[:,0:2,:,:]
 
 
         if cfg.CLAMP_INPUT:
-            input1 = torch.clamp(input1,-1,1)
+            input1 = torch.clamp(input1, -1, 1)
 
         # Compute outputs
         output = model(input1)
@@ -446,31 +382,31 @@ def validate(val_loader, model, epoch, output_writers,test_writer,logger):
         realflow[:,1,:,:] = realflow[:,1,:,:]*(h/flow1.shape[2])
 
 
-        if 'KITTI' in args.dataset:
-            # Compute both epe and outlier percentage for KITTI
-            flow_pr = realflow
-            flow_gt = target
-            epe = torch.sum((flow_pr - flow_gt)**2, dim=1).sqrt()
-            mag = torch.sum(flow_gt**2, dim=1).sqrt()
-            epe = epe.view(-1)
-            mag = mag.view(-1)
-            val = valid.contiguous().view(-1) > 0 
-            out = ((epe > 3.0) & ((epe/mag) > 0.05)).float()
-            flow2_EPE = epe[val].mean()
-            out_list.append(out[val].cpu().numpy())
-        else:
-            flow2_EPE = realEPE(realflow, target, sparse=cfg.SPARSE,extra_mask=valid)
+        # if 'KITTI' in args.dataset:
+        #     # Compute both epe and outlier percentage for KITTI
+        #     flow_pr = realflow
+        #     flow_gt = target
+        #     epe = torch.sum((flow_pr - flow_gt)**2, dim=1).sqrt()
+        #     mag = torch.sum(flow_gt**2, dim=1).sqrt()
+        #     epe = epe.view(-1)
+        #     mag = mag.view(-1)
+        #     val = valid.contiguous().view(-1) > 0
+        #     out = ((epe > 3.0) & ((epe/mag) > 0.05)).float()
+        #     flow2_EPE = epe[val].mean()
+        #     out_list.append(out[val].cpu().numpy())
+        # else:
+        #     flow2_EPE = realEPE(realflow, target, sparse=cfg.SPARSE,extra_mask=valid)
 
 
-        if torch.isinf(flow2_EPE).any() or (flow2_EPE!=flow2_EPE).any():
-            import pdb;pdb.set_trace()
-
-        flow2_EPEs.update(flow2_EPE.item(), target.size(0))
+        # if torch.isinf(flow2_EPE).any() or (flow2_EPE!=flow2_EPE).any():
+        #     import pdb;pdb.set_trace()
+        #
+        # flow2_EPEs.update(flow2_EPE.item(), target.size(0))
 
 
         # Visualization
         if args.visual_all or (i%100==0):
-            cur_valid = valid[0] if valid is not None else None
+            # cur_valid = valid[0] if valid is not None else None
             im1_vis=0.5 + (input1[0,:3])*0.5
             im2_vis=0.5 + (input1[0,3:])*0.5
             im1_vis= torch.clamp(im1_vis,0,1)
@@ -479,39 +415,40 @@ def validate(val_loader, model, epoch, output_writers,test_writer,logger):
             test_writer.add_image(('left'),im1_vis,i)
             test_writer.add_image(('right'),im2_vis,i)
 
-            target_vis = flow_to_image(target[0].cpu().detach().numpy().transpose(1,2,0),cur_valid)/255
-            target_vis = target_vis.transpose(2,0,1)
-            test_writer.add_image(('gt_flow'),target_vis,i)
+            # target_vis = flow_to_image(target[0].cpu().detach().numpy().transpose(1,2,0),cur_valid)/255
+            # target_vis = target_vis.transpose(2,0,1)
+            # test_writer.add_image(('gt_flow'),target_vis,i)
             
         for level, cur_flow in enumerate(output):
             # Visual outputs of each level
             up_flow = F.interpolate(cur_flow, (h,w), mode='bilinear', align_corners=True)
             up_flow[:,0,:,:] = up_flow[:,0,:,:]*(w/cur_flow.shape[3])
             up_flow[:,1,:,:] = up_flow[:,1,:,:]*(h/cur_flow.shape[2])
-            cur_EPE = realEPE(up_flow, target, sparse=cfg.SPARSE,valid_range = cfg.VALID_RANGE[level],extra_mask=valid)
-            epe_records[level].update(cur_EPE.item(), target.size(0))
+            # cur_EPE = realEPE(up_flow, target, sparse=cfg.SPARSE,valid_range = cfg.VALID_RANGE[level],extra_mask=valid)
+            # epe_records[level].update(cur_EPE.item(), target.size(0))
             if args.visual_all or (i%100==0):
-                cur_valid = valid[0] if valid is not None else None
-                realflow_vis = flow_to_image(up_flow[0].cpu().detach().numpy().transpose(1,2,0),cur_valid)/255
+                # cur_valid = valid[0] if valid is not None else None
+                # realflow_vis = flow_to_image(up_flow[0].cpu().detach().numpy().transpose(1,2,0),cur_valid)/255
+                realflow_vis = flow_to_image(up_flow[0].cpu().detach().numpy().transpose(1, 2, 0), None) / 255
                 realflow_vis = realflow_vis.transpose(2,0,1)
-                test_writer.add_image(('flow'+str(level)),realflow_vis,i)
+                test_writer.add_image(('flow'+str(level)), realflow_vis, i)
 
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        if i % args.print_freq == 0:
-            logger.info('EVAL: [{0}/{1}]\t Time {2}\t EPE {3}'
-                  .format(i, len(val_loader), batch_time, flow2_EPEs))
-
-    # Print each level outputs
-    if len(out_list)>1:
-        out_list = np.concatenate(out_list)
-        logger.info("KITTI * Out: %f" % (100*np.mean(out_list)))
-
-    logger.info('EVAL: * EPE {:.3f}'.format(flow2_EPEs.avg))
-    for level in range(len(output)):
-        logger.info('EVAL: Level {} Valid EPE {:.3f}'.format(level,epe_records[level].avg))
+    #     # measure elapsed time
+    #     batch_time.update(time.time() - end)
+    #     end = time.time()
+    #
+    #     if i % args.print_freq == 0:
+    #         logger.info('EVAL: [{0}/{1}]\t Time {2}\t EPE {3}'
+    #               .format(i, len(val_loader), batch_time, flow2_EPEs))
+    #
+    # # Print each level outputs
+    # if len(out_list)>1:
+    #     out_list = np.concatenate(out_list)
+    #     logger.info("KITTI * Out: %f" % (100*np.mean(out_list)))
+    #
+    # logger.info('EVAL: * EPE {:.3f}'.format(flow2_EPEs.avg))
+    # for level in range(len(output)):
+    #     logger.info('EVAL: Level {} Valid EPE {:.3f}'.format(level,epe_records[level].avg))
 
     return flow2_EPEs.avg
 
@@ -543,4 +480,43 @@ class AverageMeter(object):
 
 
 if __name__ == '__main__':
+    # User input
+    base_directory = "D:\\AirSim simulator\\FDD\\Optical flow\\DICL-Flow"
+    # img_folder = "D:\\AirSim simulator\\FDD\\Optical flow\\example_images\\Sintel_clean_ambush"
+    # video_path = os.path.join("D:\\AirSim simulator\\FDD\\Optical flow\\video_storage",
+    #                           img_folder.split("\\")[-1])
+    # fps_out = 2
+    # start_frame = 0
+    # step = 1
+    # if "Coen" in img_folder:
+    #     fps_out = 30
+    #     start_frame = 30
+    #     step = 10
+    # elif "KITTI" in img_folder:
+    #     fps_out = 1
+    #     start_frame = 0
+    #     step = 1
+
+    parser, group = user_input()
+
+    # frameSize = imread(os.path.join(img_folder, os.listdir(img_folder)[0]))[1::-1]
+    # filename = os.path.join(video_path,
+    #                         video_path.split("\\")[-1] + f"_RAFT_s{img_start}_f{fps_out}_k{img_step}.avi")
+    # out = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'DIVX'), fps_out, frameSize)
+
+
+    # parser.add_argument('--fps_out', default=fps_out, help='frames per second of the output video')
+    # parser.add_argument('--img_start', default=start_frame, help='starting image')
+    # parser.add_argument('--img_step', default=step, help='number of frames to look back to create the flow')
+    # parser.add_argument('--frameSize', default=frameSize, help='frames per second of the output video')
+    args = parser.parse_args()
+
+    args.b, args.batch_size = 1, 1
+    args.e, args.evaluate = True, True
+    args.pretrained = os.path.join(base_directory, "pretrained\\ckpt_sintel.pth.tar")
+    args.cfg = os.path.join(base_directory, "cfgs\\dicl4_sintel.yml")
+    args.data = os.path.join(base_directory, "demo_data")
+    args.exp_dir = os.path.join(base_directory, "logging")
+    args.dataset = "mpi_sintel_final"
+    args.visual_all = True
     main()

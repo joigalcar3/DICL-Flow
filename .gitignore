@@ -1,1 +1,11 @@
 .DS_Store
+
+demo_data/
+
+*.DESKTOP-8D97357
+
+pretrained/
+
+flying_chairs/default/dicl_wrapper,300epochs,b4,lr0.001/
+
+logging/dicl_wrapper,300epochs,b1,lr0.001/

@@ -6,9 +6,6 @@ import torch.utils.data as data
 import torch.nn.functional as F
 
 import os
-import cv2
-import math
-import random
 from glob import glob
 import os.path as osp
 
@@ -84,7 +81,7 @@ class FlowDataset(data.Dataset):
 
         if self.return_img_path: return [img1,img2], flow,valid, self.image_list[index][0]        
         if self.return_path: return [img1,img2], flow, self.flow_list[index]
-        return [img1,img2], flow,valid
+        return [img1,img2], flow, valid
 
     def __len__(self):
         return len(self.image_list)
@@ -193,36 +190,47 @@ class MpiSintel(FlowDataset):
         self.root = root
         self.dstype = dstype
 
-        flow_dir = 'flow'
-        assert(os.path.isdir(os.path.join(self.root,flow_dir)))
-        img_dir = dstype 
-        assert(os.path.isdir(os.path.join(self.root,img_dir)))
 
-        images = []
-        for flow_map in sorted(glob(os.path.join(self.root,flow_dir,'*','*.flo'))):
-            flow_map = os.path.relpath(flow_map,os.path.join(self.root,flow_dir))
+        if not args.e:
+            img_dir = dstype
+            assert (os.path.isdir(os.path.join(self.root, img_dir)))
+            flow_dir = 'flow'
+            assert (os.path.isdir(os.path.join(self.root, flow_dir)))
 
-            scene_dir, filename = os.path.split(flow_map)
-            no_ext_filename = os.path.splitext(filename)[0]
-            prefix, frame_nb = no_ext_filename.split('_')
-            frame_nb = int(frame_nb)
-            img1 = os.path.join(img_dir, scene_dir, '{}_{:04d}.png'.format(prefix, frame_nb))
-            img2 = os.path.join(img_dir, scene_dir, '{}_{:04d}.png'.format(prefix, frame_nb + 1))
-            flow_map = os.path.join(flow_dir,flow_map)
-            if not (os.path.isfile(os.path.join(self.root,img1)) or os.path.isfile(os.path.join(self.root,img2))):
-                continue
-            images.append([[img1,img2],flow_map])
+            images = []
+            for flow_map in sorted(glob(os.path.join(self.root,flow_dir,'*','*.flo'))):
+                flow_map = os.path.relpath(flow_map,os.path.join(self.root,flow_dir))
+
+                scene_dir, filename = os.path.split(flow_map)
+                no_ext_filename = os.path.splitext(filename)[0]
+                prefix, frame_nb = no_ext_filename.split('_')
+                frame_nb = int(frame_nb)
+                img1 = os.path.join(img_dir, scene_dir, '{}_{:04d}.png'.format(prefix, frame_nb))
+                img2 = os.path.join(img_dir, scene_dir, '{}_{:04d}.png'.format(prefix, frame_nb + 1))
+                flow_map = os.path.join(flow_dir,flow_map)
+                if not (os.path.isfile(os.path.join(self.root,img1)) or os.path.isfile(os.path.join(self.root,img2))):
+                    continue
+                images.append([[img1,img2],flow_map])
         
-        # Use split2list just to ensure the same data structure; actually we do not split here
-        tbd_list, _ = split2list(images, split=1.1, default_split=1.1,order=True)
+            # Use split2list just to ensure the same data structure; actually we do not split here
+            tbd_list, _ = split2list(images, split=1.1, default_split=1.1,order=True)
 
-        self.flow_list = []
-        self.image_list = []
-        for i in range(len(tbd_list)):
-            self.flow_list.append(os.path.join(root,tbd_list[i][1]))
-            im1 = os.path.join(root,tbd_list[i][0][0])
-            im2 = os.path.join(root,tbd_list[i][0][1])
-            self.image_list.append([im1, im2])
+            self.flow_list = []
+            self.image_list = []
+            for i in range(len(tbd_list)):
+                self.flow_list.append(os.path.join(root,tbd_list[i][1]))
+                im1 = os.path.join(root,tbd_list[i][0][0])
+                im2 = os.path.join(root,tbd_list[i][0][1])
+                self.image_list.append([im1, im2])
+        else:
+            self.flow_list = []
+            self.image_list = []
+            filenames = sorted(os.listdir(root))
+            for i in range(1, len(filenames)):
+                im1 = os.path.join(root, filenames[i-1])
+                im2 = os.path.join(root, filenames[i])
+                self.image_list.append([im1, im2])
+                self.flow_list.append(im1)
 
 
 

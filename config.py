@@ -80,8 +80,8 @@ __C.SUP_RAW_FLOW = False # supervise both raw flow (by soft argmin) and refined 
 def cfg_from_file(filename):
     """Load a config file and merge it into the default options."""
     import yaml
-    with open(filename, 'r') as f:
-        yaml_cfg = edict(yaml.load(f))
+    with open(filename, 'r',  encoding='utf-8') as f:
+        yaml_cfg = edict(yaml.safe_load(f))
 
     _merge_a_into_b(yaml_cfg, __C)
 
